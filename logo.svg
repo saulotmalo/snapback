@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Background -->
+  <rect width="256" height="256" rx="40" fill="#1a1a2e"/>
+
+  <!-- Bluetooth bolt symbol -->
+  <polygon points="128,40 100,128 124,128 96,216 164,112 136,112 164,40"
+           fill="none" stroke="#4fc3f7" stroke-width="6" stroke-linejoin="round"/>
+
+  <!-- Snap arc top-right -->
+  <path d="M148,72 A60,60 0 0,1 148,184"
+        fill="none" stroke="#4fc3f7" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- Snap arc top-right outer -->
+  <path d="M164,56 A84,84 0 0,1 164,200"
+        fill="none" stroke="#4fc3f7" stroke-width="4" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- Snap arc bottom-left -->
+  <path d="M108,184 A60,60 0 0,1 108,72"
+        fill="none" stroke="#4fc3f7" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- Label -->
+  <text x="128" y="244" font-family="Arial, sans-serif" font-size="18" font-weight="bold"
+        fill="#4fc3f7" text-anchor="middle" letter-spacing="3">SNAPBACK</text>
+</svg>

@@ -1,0 +1,109 @@
+═══════════════════════════════════════════════════════════════════════
+  apple-bt-reconnect  —  Installation Guide
+═══════════════════════════════════════════════════════════════════════
+
+REQUIREMENTS
+────────────
+  • Nintendo Switch with Atmosphere CFW (≥ 1.4.0 recommended)
+  • Firmware 13.0.0 or later  (BT audio support was added in 13.0.0)
+  • Apple headphones already PAIRED to the Switch via System Settings
+    › Bluetooth Audio › Pair Device
+
+BUILD (on your PC)
+────────────────────
+  1. Install devkitPro: https://devkitpro.org/wiki/Getting_Started
+     pacman -S switch-dev
+  2. bash build_all.sh
+     → out/main.nso                            (sysmodule binary)
+     → config_app/out/apple-bt-reconnect-config.nro  (setup app)
+
+DEPLOY TO SD CARD
+─────────────────
+Sysmodule (runs on every boot):
+
+  SD:/atmosphere/contents/0100000000000C4A/exefs/main       ← rename main.nso to "main"
+  SD:/atmosphere/contents/0100000000000C4A/flags/boot2.flag ← empty file
+  SD:/atmosphere/contents/0100000000000C4A/toolbox.json     ← copy from project root
+
+Config app (run once to set up):
+
+  SD:/switch/apple-bt-reconnect-config/apple-bt-reconnect-config.nro
+
+Quick shell script (Linux/Mac, SD mounted at /mnt/sd):
+
+  TITLE=0100000000000C4A
+  mkdir -p /mnt/sd/atmosphere/contents/$TITLE/{exefs,flags}
+  cp out/main.nso              /mnt/sd/atmosphere/contents/$TITLE/exefs/main
+  touch                        /mnt/sd/atmosphere/contents/$TITLE/flags/boot2.flag
+  cp toolbox.json              /mnt/sd/atmosphere/contents/$TITLE/toolbox.json
+  mkdir -p /mnt/sd/switch/apple-bt-reconnect-config
+  cp config_app/out/apple-bt-reconnect-config.nro \
+     /mnt/sd/switch/apple-bt-reconnect-config/
+
+FIRST-TIME SETUP
+────────────────
+Option A — Config App (easiest):
+  1. Eject and insert SD card into your Switch.
+  2. Open Homebrew Menu, launch "apple-bt-reconnect Config".
+  3. The app lists all paired Bluetooth audio devices.
+  4. Select your AirPods / Beats with A.
+  5. Config is written to SD:/switch/apple-bt-reconnect/config.ini
+  6. Reboot — headphones will auto-connect on the next boot.
+
+Option B — Manual config:
+  1. Boot without config — the sysmodule tries ALL paired audio devices
+     and logs everything to: SD:/switch/apple-bt-reconnect/log.txt
+  2. Open log.txt on your PC, find the MAC address of your headphones:
+       [bt]   paired[0] = AA:BB:CC:DD:EE:FF  "Oscar's AirPods Pro"
+  3. Copy config.ini.example to SD:/switch/apple-bt-reconnect/config.ini
+  4. Fill in the address line and save.
+
+VERIFICATION
+────────────
+  After rebooting, check SD:/switch/apple-bt-reconnect/log.txt
+  Successful connection looks like:
+
+    [main] ── Attempt 1 ──────────────────────────
+    [bt] btmGetDeviceInfo(Audio) => 1 device(s)
+    [bt]   paired[0] = AA:BB:CC:DD:EE:FF  "Oscar's AirPods Pro"
+    [bt] Attempting to connect to AA:BB:CC:DD:EE:FF ...
+    [bt]   btmConnectDevice => 0x00000000
+    [main] Connection request accepted for AA:BB:CC:DD:EE:FF
+
+TROUBLESHOOTING
+───────────────
+"btmGetDeviceInfo rc=0x202" or similar
+  → No audio devices are paired yet. Pair via System Settings first.
+
+"btmConnectDevice => 0x..."  (non-zero)
+  → The headphones are out of range, off, or connected to another device.
+  → Put them back in their case, then near the Switch. The sysmodule
+    retries every 12 seconds automatically.
+
+Sysmodule doesn't appear to run
+  → Confirm boot2.flag exists (even as a 0-byte file).
+  → Check Atmosphere version supports 0x0100000000000C4A as a custom title.
+  → Some older Atmosphere builds restrict which title IDs can host sysmodules.
+    Try a title ID from the range 0x0100000000000E00–0x0100000000000EFF instead.
+
+Bluetooth audio not routing through headphones after connection
+  → The BT audio stack accepted the connection but the Switch audio output
+    setting may not automatically switch. Check System Settings › Sound.
+  → This is a Switch OS limitation — it should switch automatically, but
+    some firmware versions require manual selection after the first boot.
+
+ABOUT APPLE HEADPHONES SPECIFICALLY
+────────────────────────────────────
+AirPods and Beats headphones implement standard A2DP + AVRCP Bluetooth profiles
+when paired with non-Apple devices, so they work as generic BT audio devices on
+the Switch.
+
+One quirk: AirPods remember up to 8 paired devices but only actively remember
+the LAST connected device. If you use your AirPods with an iPhone between Switch
+sessions, the Switch needs to initiate the connection (the headphones won't
+auto-return to it). This sysmodule handles exactly that case.
+
+For AirPods Pro (2nd gen) and later with USB-C case — the Bluetooth address
+is printed inside the case lid, which can help for manual config setup.
+
+═══════════════════════════════════════════════════════════════════════

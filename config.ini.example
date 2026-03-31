@@ -1,0 +1,25 @@
+# apple-bt-reconnect config
+# Copy to: /switch/apple-bt-reconnect/config.ini
+# (or use the config app to generate this automatically)
+
+# ─── Target device (optional) ─────────────────────────────────
+# If omitted, tries ALL paired audio devices.
+# address = AA:BB:CC:DD:EE:FF
+# name    = My AirPods Pro
+
+# ─── Mode ─────────────────────────────────────────────────────
+# polling  - attempt reconnect every N seconds (default)
+# wake     - attempt reconnect when the screen turns on
+mode = polling
+
+# ─── Polling interval ─────────────────────────────────────────
+# Seconds between reconnect attempts (polling mode only).
+polling_interval = 12
+
+# ─── Boot delay ───────────────────────────────────────────────
+# Seconds to wait after boot before first attempt.
+boot_delay = 18
+
+# ─── Max retries ──────────────────────────────────────────────
+# 0 = retry forever
+max_retries = 0

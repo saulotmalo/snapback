@@ -1,0 +1,32 @@
+# apple-bt-reconnect config
+# Copy to: /switch/apple-bt-reconnect/config.ini on your SD card
+#
+# HOW TO FIND YOUR HEADPHONE MAC ADDRESS
+# ────────────────────────────────────────────────────────────────
+# 1. Pair your AirPods / Beats with the Switch via
+#    System Settings > Bluetooth Audio > Pair Device
+# 2. Boot the Switch with this sysmodule once (no config needed).
+# 3. Open /switch/apple-bt-reconnect/log.txt from the SD card.
+# 4. Look for lines like:
+#       [bt]   paired[0] = AA:BB:CC:DD:EE:FF  "Oscar's AirPods Pro"
+# 5. Copy that address below and uncomment.
+
+# ─── Target device (optional) ─────────────────────────────────
+# If you leave this out, the sysmodule will try ALL paired audio devices.
+# Specify only if you want to limit reconnection to one set of headphones.
+#
+# address = AA:BB:CC:DD:EE:FF
+# name    = Oscar's AirPods Pro
+
+# ─── Timing ───────────────────────────────────────────────────
+# Seconds to wait after boot before the first connection attempt.
+# The Bluetooth stack needs a moment to start. 18s is safe.
+boot_delay = 18
+
+# Seconds between retry attempts.
+retry_interval = 12
+
+# Maximum number of connection attempts (0 = retry forever).
+# Set to e.g. 20 (~4 minutes) if you want the sysmodule to stop
+# polling once the headphones are far away.
+max_retries = 0
