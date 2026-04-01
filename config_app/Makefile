@@ -16,9 +16,12 @@ SOURCES  := source
 INCLUDES := include
 ROMFS    :=
 
-APP_TITLE   := apple-bt-reconnect Config
-APP_AUTHOR  := HomeBrew
-APP_VERSION := 1.0.0
+APP_TITLE   := SnapBack
+APP_AUTHOR  := saulotmalo
+APP_VERSION := 1.1.0
+APP_ICON    := $(TOPDIR)/icon.jpg
+
+export APP_TITLE APP_AUTHOR APP_VERSION APP_ICON
 
 ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
@@ -72,6 +75,8 @@ else
 .PHONY: all
 
 DEPENDS := $(OFILES:.o=.d)
+
+NROFLAGS := --nacp=$(OUTPUT).nacp --icon=$(APP_ICON)
 
 all: $(OUTPUT).nro
 
