@@ -24,15 +24,51 @@
 #include <sys/stat.h>
 
 // ─── Sysmodule identity ────────────────────────────────────────────────────
+// CRITICAL: override libnx's weak __appInit. The default pulls in time:u (and
+// friends). Holding time:u from a boot2 sysmodule blanks the HOME clock after
+// Sphaira / other applets suspend — and if time:u is not in service_access the
+// process User-Breaks (Atmosphere 2345-0038) instead. We only need sm + fs.
 extern "C" {
     u32 __nx_applet_type     = AppletType_None;
     u32 __nx_fs_num_sessions = 1;
+
     void __libnx_initheap(void) {
         static char heap[256 * 1024];
         extern char* fake_heap_start;
         extern char* fake_heap_end;
         fake_heap_start = heap;
         fake_heap_end   = heap + sizeof(heap);
+    }
+
+    void __appInit(void) {
+        Result rc = smInitialize();
+        if (R_FAILED(rc))
+            diagAbortWithResult(MAKERESULT(Module_Libnx, LibnxError_InitFail_SM));
+
+        // Required so libnx picks the correct btm IPC (13.0+ GetDeviceInfo).
+        // Without this, hosversion stays 0 and btmGetDeviceInfo returns 0x4B59.
+        rc = setsysInitialize();
+        if (R_SUCCEEDED(rc)) {
+            SetSysFirmwareVersion fw = {};
+            rc = setsysGetFirmwareVersion(&fw);
+            if (R_SUCCEEDED(rc))
+                hosversionSet(MAKEHOSVERSION(fw.major, fw.minor, fw.micro));
+            setsysExit();
+        }
+
+        rc = fsInitialize();
+        if (R_FAILED(rc))
+            diagAbortWithResult(MAKERESULT(Module_Libnx, LibnxError_InitFail_FS));
+
+        fsdevMountSdmc();
+        // Intentionally NO timeInitialize / hidInitialize / pscmInitialize —
+        // those forever sessions blank the HOME clock after Sphaira.
+    }
+
+    void __appExit(void) {
+        fsdevUnmountAll();
+        fsExit();
+        smExit();
     }
 }
 
@@ -48,42 +84,47 @@ static RunMode g_mode = MODE_POLLING;
 static int g_polling_interval_sec = 12;
 static int g_boot_delay_sec       = 18;
 static int g_max_retries          = 0;
+// After a verified connect, exit the process so nothing stays resident.
+// Default on: safest for the HOME clock. Set 0 in config.ini to keep polling.
+static int g_exit_when_connected  = 1;
 
 static BtdrvAddress g_filter_addr    = {};
 static bool         g_filter_set     = false;
 static char         g_filter_name[64] = {};
 
 // ─── Logging ───────────────────────────────────────────────────────────────
-static FILE* g_log      = nullptr;
-static int   g_log_lines = 0;
+// Open/append/close per line so FTP (and the next boot) can read the file —
+// holding fopen for the life of the module returns "resource busy" over sys-ftp.
+static int g_log_lines = 0;
 static const int LOG_ROTATE_LINES = 500;
+static bool g_log_ready = false;
 
 static void log_open() {
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/snapback", 0777);
-    g_log = fopen(LOG_PATH, "w");
+    FILE* f = fopen(LOG_PATH, "w");
+    if (f) fclose(f);
     g_log_lines = 0;
-}
-
-static void log_rotate() {
-    if (!g_log) return;
-    fclose(g_log);
-    g_log = fopen(LOG_PATH, "w");
-    g_log_lines = 0;
-    if (g_log) {
-        fprintf(g_log, "[log] rotated\n");
-        fflush(g_log);
-    }
+    g_log_ready = true;
 }
 
 static void log_print(const char* fmt, ...) {
-    if (!g_log) return;
-    if (g_log_lines >= LOG_ROTATE_LINES) log_rotate();
+    if (!g_log_ready) return;
+    if (g_log_lines >= LOG_ROTATE_LINES) {
+        FILE* rot = fopen(LOG_PATH, "w");
+        if (rot) {
+            fprintf(rot, "[log] rotated\n");
+            fclose(rot);
+        }
+        g_log_lines = 0;
+    }
+    FILE* f = fopen(LOG_PATH, "a");
+    if (!f) return;
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(g_log, fmt, ap);
+    vfprintf(f, fmt, ap);
     va_end(ap);
-    fflush(g_log);
+    fclose(f);
     g_log_lines++;
 }
 
@@ -162,6 +203,9 @@ static void load_config() {
         } else if (strcasecmp(key, "max_retries") == 0) {
             g_max_retries = atoi(val);
             log_print("[cfg] Max retries: %d\n", g_max_retries);
+        } else if (strcasecmp(key, "exit_when_connected") == 0) {
+            g_exit_when_connected = atoi(val);
+            log_print("[cfg] Exit when connected: %d\n", g_exit_when_connected);
         }
     }
     fclose(f);
@@ -170,9 +214,9 @@ static void load_config() {
 // ─── Bluetooth session ─────────────────────────────────────────────────────
 static void bt_open() {
     Result rc = btmInitialize();
-    if (R_FAILED(rc)) log_print("[bt] btmInitialize: 0x%08X\n", rc);
+    log_print("[bt] btmInitialize => 0x%08X\n", rc);
     rc = btdrvInitialize();
-    if (R_FAILED(rc)) log_print("[bt] btdrvInitialize: 0x%08X\n", rc);
+    log_print("[bt] btdrvInitialize => 0x%08X\n", rc);
 }
 
 static void bt_close() {
@@ -254,24 +298,45 @@ static Result connect_audio_device(const BtdrvAddress& addr) {
     return rc;
 }
 
+// Wait up to ~5s for the device to appear in btmGetDeviceCondition.
+// Old builds that "worked" often needed a full poll interval (~12s) before
+// "already connected" showed up — 500ms was far too short.
+static bool wait_until_connected(const BtdrvAddress& addr, int timeout_ms) {
+    const int step_ms = 250;
+    for (int waited = 0; waited < timeout_ms; waited += step_ms) {
+        if (is_audio_connected(addr)) return true;
+        svcSleepThread((u64)step_ms * 1'000'000ULL);
+    }
+    return is_audio_connected(addr);
+}
+
 // Attempt connection to all candidates that are not already connected.
-// Returns true if all candidates are connected (existing or newly established).
+// Returns true only when every candidate is verified in the connected list.
 static bool attempt_all_candidates() {
     BtdrvAddress candidates[8] = {};
     int n = get_paired_audio_devices(candidates, 8);
     log_print("[main] %d candidate(s)\n", n);
+    if (n <= 0) return false;
 
     bool all_connected = true;
     for (int i = 0; i < n; i++) {
+        char addr_s[18];
+        addr_to_str(candidates[i], addr_s, sizeof(addr_s));
+
         if (is_audio_connected(candidates[i])) {
-            char addr_s[18];
-            addr_to_str(candidates[i], addr_s, sizeof(addr_s));
             log_print("[bt] %s already connected, skipping\n", addr_s);
             continue;
         }
         Result rc = connect_audio_device(candidates[i]);
         if (R_FAILED(rc)) {
             log_print("[main] Failed 0x%08X\n", rc);
+            all_connected = false;
+            continue;
+        }
+        if (wait_until_connected(candidates[i], 5000)) {
+            log_print("[bt] %s verified connected\n", addr_s);
+        } else {
+            log_print("[bt] %s open ok but not verified yet\n", addr_s);
             all_connected = false;
         }
     }
@@ -285,6 +350,7 @@ static void reload_config() {
     g_polling_interval_sec = 12;
     g_boot_delay_sec       = 18;
     g_max_retries          = 0;
+    g_exit_when_connected  = 1;
     g_filter_set           = false;
     memset(&g_filter_addr, 0, sizeof(g_filter_addr));
     memset(g_filter_name,  0, sizeof(g_filter_name));
@@ -292,63 +358,20 @@ static void reload_config() {
 }
 
 // ─── Polling mode ──────────────────────────────────────────────────────────
+// No psc:m. No time:u. Brief btm/btdrv around each attempt only.
+// Default: exit the process after a verified connect (clock-safe).
 static void run_polling() {
     log_print("[main] Mode: polling (interval=%ds)\n", g_polling_interval_sec);
+    log_print("[main] clock-safe: no time:u, no psc; exit_when_connected=%d\n",
+              g_exit_when_connected);
     int attempt = 0;
     bool was_connected = false;
-    bool screen_on = true;
-
-    // Register with PSC to track screen state (optional — falls back gracefully)
-    PscPmModule psc = {};
-    bool psc_ok = false;
-    if (R_SUCCEEDED(pscmInitialize())) {
-        if (R_SUCCEEDED(pscmGetPmModule(&psc, PscPmModuleId_Bluetooth, nullptr, 0, true))) {
-            psc_ok = true;
-            log_print("[psc] Screen-state tracking active\n");
-        } else {
-            pscmExit();
-        }
-    }
 
     while (true) {
-        // Drain any pending PSC events to update screen_on state
-        if (psc_ok) {
-            while (R_SUCCEEDED(eventWait(&psc.event, 0))) {
-                PscPmState state; u32 flags;
-                if (R_SUCCEEDED(pscPmModuleGetRequest(&psc, &state, &flags))) {
-                    if (state == PscPmState_Awake || state == PscPmState_ReadyAwaken) {
-                        log_print("[psc] Screen on\n");
-                        screen_on = true;
-                    } else if (state == PscPmState_ReadySleep || state == PscPmState_ReadySleepCritical) {
-                        log_print("[psc] Screen off -- pausing\n");
-                        screen_on = false;
-                    }
-                    pscPmModuleAcknowledge(&psc, state);
-                }
-            }
-        }
-
-        // If screen is off, wait for it to come back on
-        if (psc_ok && !screen_on) {
-            PscPmState state; u32 flags;
-            if (R_SUCCEEDED(eventWait(&psc.event, UINT64_MAX)) &&
-                R_SUCCEEDED(pscPmModuleGetRequest(&psc, &state, &flags))) {
-                if (state == PscPmState_Awake || state == PscPmState_ReadyAwaken) {
-                    log_print("[psc] Screen on -- resuming\n");
-                    screen_on = true;
-                }
-                pscPmModuleAcknowledge(&psc, state);
-            }
-            continue; // re-check state at top of loop
-        }
-
-        // Hot reload config each cycle
         reload_config();
-        if (g_mode == MODE_WAKE) {
-            log_print("[main] Config changed to wake mode, switching.\n");
-            if (psc_ok) { pscPmModuleClose(&psc); pscmExit(); }
-            return;
-        }
+        // wake mode is treated as polling now (PSC path removed — it broke the clock)
+        if (g_mode == MODE_WAKE)
+            log_print("[main] mode=wake ignored (using polling; no PSC)\n");
 
         attempt++;
         log_print("[main] -- Attempt %d --\n", attempt);
@@ -359,114 +382,45 @@ static void run_polling() {
 
         if (connected && !was_connected)
             log_print("[main] Connected\n");
+        else if (!connected && was_connected)
+            log_print("[main] Lost connection — retrying\n");
         was_connected = connected;
+
+        if (connected && g_exit_when_connected) {
+            log_print("[main] Done - exiting process (clock-safe)\n");
+            return;
+        }
 
         if (g_max_retries > 0 && attempt >= g_max_retries) {
             log_print("[main] Reached max_retries=%d, stopping.\n", g_max_retries);
-            break;
+            return;
         }
-        // When connected: poll infrequently to avoid IPC interference with audio
-        // When disconnected: poll at the configured interval for fast reconnect
-        int sleep_sec = connected ? 30 : g_polling_interval_sec;
-        log_print("[main] Sleeping %ds ...\n", sleep_sec);
+
+        // Not verified yet: retry quickly. OpenAudioConnection may need a few
+        // rounds before the headset lands in the connected list.
+        int sleep_sec = connected ? 60 : g_polling_interval_sec;
+        log_print("[main] Idle %ds (no services held) ...\n", sleep_sec);
         svcSleepThread((u64)sleep_sec * 1'000'000'000ULL);
     }
-
-    if (psc_ok) { pscPmModuleClose(&psc); pscmExit(); }
-}
-
-// ─── Wake mode ─────────────────────────────────────────────────────────────
-static void run_wake() {
-    log_print("[main] Mode: wake (trigger on screen-on)\n");
-
-    Result rc = pscmInitialize();
-    if (R_FAILED(rc)) {
-        log_print("[psc] pscmInitialize failed: 0x%08X\n", rc);
-        // Retry after a delay rather than tight-looping
-        svcSleepThread(30'000'000'000ULL);
-        return;
-    }
-
-    PscPmModule psc = {};
-    rc = pscmGetPmModule(&psc, PscPmModuleId_Bluetooth, nullptr, 0, true);
-    if (R_FAILED(rc)) {
-        log_print("[psc] pscmGetPmModule failed: 0x%08X, retrying later\n", rc);
-        pscmExit();
-        svcSleepThread(30'000'000'000ULL);
-        return;
-    }
-    log_print("[psc] PSC module registered\n");
-
-    // Do one attempt on entry too
-    log_print("[main] Initial attempt\n");
-    bt_open();
-    attempt_all_candidates();
-    bt_close();
-
-    while (true) {
-        // Wait for a power state change event (timeout every 30s to check config)
-        rc = eventWait(&psc.event, 30'000'000'000ULL);
-        if (R_FAILED(rc)) {
-            // Timeout or error — check if config changed, then loop
-            reload_config();
-            if (g_mode != MODE_WAKE) {
-                log_print("[main] Config changed away from wake mode\n");
-                break;
-            }
-            continue;
-        }
-
-        PscPmState state;
-        u32 flags;
-        rc = pscPmModuleGetRequest(&psc, &state, &flags);
-        if (R_FAILED(rc)) {
-            log_print("[psc] GetRequest failed: 0x%08X\n", rc);
-            pscPmModuleAcknowledge(&psc, state);
-            continue;
-        }
-
-        log_print("[psc] State change: %u\n", (u32)state);
-
-        if (state == PscPmState_Awake || state == PscPmState_ReadyAwaken) {
-            log_print("[main] Woke up -- attempting reconnect\n");
-            // Brief delay to let BT stack settle after wake
-            svcSleepThread(3'000'000'000ULL);
-            bt_open();
-            attempt_all_candidates();
-            bt_close();
-        }
-
-        pscPmModuleAcknowledge(&psc, state);
-    }
-
-    pscPmModuleClose(&psc);
-    pscmExit();
 }
 
 // ─── Entry point ───────────────────────────────────────────────────────────
 int main(int, char**) {
-    Result rc = fsInitialize();
-    if (R_FAILED(rc)) return 1;
-    fsdevMountSdmc();
+    // sm/fs/sdmc already up via __appInit
     log_open();
 
     log_print("==============================================\n");
-    log_print("  snapback v1.1  (%s %s)\n", __DATE__, __TIME__);
+    log_print("  snapback v1.1-sft7  (%s %s)\n", __DATE__, __TIME__);
     log_print("==============================================\n");
+    log_print("[init] hosversion=0x%08X\n", hosversionGet());
 
     load_config();
 
     log_print("[main] Boot delay %ds ...\n", g_boot_delay_sec);
     svcSleepThread((u64)g_boot_delay_sec * 1'000'000'000ULL);
 
-    while (true) {
-        if (g_mode == MODE_WAKE)
-            run_wake();
-        else
-            run_polling();
-    }
-    if (g_log) fclose(g_log);
-    fsdevUnmountAll();
-    fsExit();
+    run_polling();
+
+    log_print("[main] exit\n");
     return 0;
 }

@@ -3,10 +3,14 @@
 	"title_id":	"0x420000000000000C",
 	"title_id_range_min":	"0x420000000000000C",
 	"title_id_range_max":	"0x420000000000000C",
+	"program_id":	"0x420000000000000C",
+	"program_id_range_min":	"0x420000000000000C",
+	"program_id_range_max":	"0x420000000000000C",
 	"main_thread_stack_size":	"0x00004000",
 	"main_thread_priority":	44,
 	"default_cpu_id":	3,
 	"process_category":	0,
+	"version":	0,
 	"is_retail":	true,
 	"pool_partition":	2,
 	"is_64_bit":	true,
@@ -15,7 +19,7 @@
 		"permissions":	"0xffffffffffffffff"
 	},
 	"service_access":	["*"],
-	"service_host":	["*"],
+	"service_host":	[],
 	"kernel_capabilities":	[{
 			"type":	"kernel_flags",
 			"value":	{
